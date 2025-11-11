@@ -1,40 +1,23 @@
-"""
-Simple Discord verification bot.
-
-Usage:
-  - Set environment variable DISCORD_TOKEN with your bot token
-  - Run: python bot.py
-
-Commands:
-  !verify <char_id> [expected_ign] [expected_guild]
-    - char_id: the id query param used on https://account.aq.com/CharPage?id=<char_id>
-    - expected_ign (optional): the in-game name you expect to see on the page
-    - expected_guild (optional): the guild name you expect to see on the page
-
-The bot will fetch the character page, parse the character name and guild, and reply
-whether they match the provided expected values. If parsing fails it will return helpful
-debug info so you can adjust.
-"""
 import os
 import asyncio
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
 from dotenv import load_dotenv
+import aiohttp
+from functools import lru_cache
 
-# Load environment variables from .env if present (kept out of git)
 load_dotenv()
 
-from scraper import get_character_info
+from scraper import get_character_info_async
 
 
 intents = discord.Intents.default()
-# message_content is not required for slash commands, keep default behavior
 bot = commands.Bot(command_prefix="!", intents=intents)
+http_session = None
 
 
 class FinishVerificationView(ui.View):
-    """View with button to finish verification and delete the channel."""
     def __init__(self, channel: discord.TextChannel, user: discord.Member, ign: str):
         super().__init__()
         self.channel = channel
@@ -43,11 +26,9 @@ class FinishVerificationView(ui.View):
     
     @ui.button(label="Finish Verification", style=discord.ButtonStyle.success)
     async def finish_button(self, interaction: discord.Interaction, button: ui.Button):
-        """Change user nickname and delete the verification channel."""
         try:
             print(f"[finish_button] Clicked by {interaction.user} to close channel {self.channel.name}")
             
-            # Change the verified user's nickname to their IGN
             nickname_changed = False
             try:
                 print(f"[finish_button] Changing nickname for {self.user.name} to {self.ign}")
@@ -56,7 +37,6 @@ class FinishVerificationView(ui.View):
                 nickname_changed = True
             except discord.Forbidden:
                 print(f"[finish_button] Missing permissions to change nickname")
-                # Send a message before channel is deleted
                 await interaction.response.send_message(
                     f"⚠️ **Verification complete!** However, I don't have permission to change your nickname.\n\n"
                     f"**Please ask a server admin to:**\n"
@@ -70,12 +50,10 @@ class FinishVerificationView(ui.View):
             except Exception as nick_err:
                 print(f"[finish_button] Unexpected error changing nickname: {nick_err}")
             
-            # If nickname was changed successfully, respond and delete quickly
             if nickname_changed:
                 await interaction.response.send_message(f"✅ Nickname changed to `{self.ign}` and verification complete!", ephemeral=True)
                 await asyncio.sleep(1)
             
-            # Delete the channel
             await self.channel.delete()
             print(f"[finish_button] Successfully deleted channel {self.channel.name}")
         except Exception as e:
@@ -90,16 +68,10 @@ class FinishVerificationView(ui.View):
 
 
 class VerificationModal(ui.Modal, title="Character Verification"):
-    """Modal form for user to input IGN and Guild only (no character id).
-
-    The bot will use the provided IGN as the character identifier when fetching the
-    official character page (https://account.aq.com/CharPage?id=<IGN>).
-    """
     ign = ui.TextInput(label="Character IGN (In-Game Name)", placeholder="Enter your character name (used as ID)", required=True, max_length=100)
     guild = ui.TextInput(label="Guild (leave blank if none)", placeholder="Enter your guild or leave empty", required=False, max_length=100)
 
     async def on_submit(self, interaction: discord.Interaction):
-        """Handle form submission and verify against character page using IGN as id."""
         import traceback
         
         try:
@@ -107,34 +79,27 @@ class VerificationModal(ui.Modal, title="Character Verification"):
             await interaction.response.defer(thinking=True)
             print(f"[on_submit] Deferred interaction")
 
-            # Get user input
             user_ign = self.ign.value.strip()
             user_guild = self.guild.value.strip() if self.guild.value else ""
             print(f"[on_submit] User input: ign='{user_ign}', guild='{user_guild}'")
 
-            # Use IGN as the char_id when fetching the page
             char_id = user_ign
 
-            # Fetch character page
             print(f"[on_submit] Fetching character info for char_id='{char_id}'")
-            info = await asyncio.to_thread(get_character_info, char_id)
+            info = await get_character_info_async(char_id, http_session)
             print(f"[on_submit] Got info: {info}")
 
-            # Get page values
             page_name = info.get("name", "").strip() if info.get("name") else ""
             page_guild = info.get("guild", "").strip() if info.get("guild") else ""
             print(f"[on_submit] Page values: name='{page_name}', guild='{page_guild}'")
 
-            # Normalize for comparison (case-insensitive, trim whitespace)
             def normalize(s: str) -> str:
                 return " ".join(s.lower().split()) if s else ""
 
-            # Compare
             name_match = normalize(user_ign) == normalize(page_name) if page_name else False
             guild_match = normalize(user_guild) == normalize(page_guild) if page_guild or user_guild else (not page_guild and not user_guild)
             print(f"[on_submit] Comparison: name_match={name_match}, guild_match={guild_match}")
 
-            # Build result embed
             embed = discord.Embed(title="Verification Result", color=discord.Color.green() if (name_match and guild_match) else discord.Color.red())
             embed.add_field(name="Character IGN (used as ID)", value=char_id, inline=False)
             embed.add_field(name="IGN Check", value=f"{'✅ MATCH' if name_match else '❌ MISMATCH'}\nYou entered: `{user_ign}`\nPage shows: `{page_name}`", inline=False)
@@ -142,31 +107,20 @@ class VerificationModal(ui.Modal, title="Character Verification"):
 
             if name_match and guild_match:
                 embed.add_field(name="Status", value="✅ **Verification Successful!**", inline=False)
-                
-                # Create private admin channel for successful verification
                 print(f"[on_submit] Creating private admin channel for {interaction.user.name}...")
                 try:
                     guild = interaction.guild
                     if guild:
-                        # Get all members with admin/manage permissions or are the owner
                         admin_overwrites = {}
-                        
-                        # Owner always has access
                         if guild.owner:
                             admin_overwrites[guild.owner] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
                         
-                        # Add admins/members with manage_guild permission
-                        for member in guild.members:
-                            if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
-                                admin_overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                        admin_role = discord.utils.find(lambda r: r.permissions.administrator, guild.roles)
+                        if admin_role:
+                            admin_overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
                         
-                        # User who verified gets access too
                         admin_overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-                        
-                        # Deny @everyone
                         admin_overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
-                        
-                        # Create the channel
                         channel_name = f"verification-{interaction.user.name.lower().replace(' ', '-')}"
                         channel = await guild.create_text_channel(
                             channel_name,
@@ -174,13 +128,8 @@ class VerificationModal(ui.Modal, title="Character Verification"):
                             topic=f"Verification record for {interaction.user.name} (IGN: {user_ign})"
                         )
                         print(f"[on_submit] Created channel: {channel.mention}")
-                        
-                        # Send verification result to admin channel with finish button
-                        # Pass the user and IGN to the finish button view
                         finish_view = FinishVerificationView(channel, interaction.user, user_ign)
                         await channel.send(embed=embed, view=finish_view)
-                        
-                        # Send confirmation to user that verification was created
                         confirmation = discord.Embed(
                             title="✅ Verification Processed",
                             description=f"Your verification has been recorded in {channel.mention}. An admin can close the channel when ready.",
@@ -213,13 +162,11 @@ class VerificationModal(ui.Modal, title="Character Verification"):
 
 
 class VerifyButton(ui.View):
-    """Button view for triggering verification modal."""
     def __init__(self):
         super().__init__()
 
     @ui.button(label="Start Verification", style=discord.ButtonStyle.primary)
     async def verify_button(self, interaction: discord.Interaction, button: ui.Button):
-        """Show the verification modal when button is clicked."""
         try:
             print(f"[verify_button] Button clicked by {interaction.user}")
             modal = VerificationModal()
@@ -236,11 +183,17 @@ class VerifyButton(ui.View):
                 print(f"[verify_button] Could not send error message")
 @bot.event
 async def on_ready():
+    global http_session
     import traceback
     try:
+        if http_session is None:
+            http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10),
+                connector=aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+            )
+            print("✅ HTTP session pool initialized")
+        
         print(f"Bot ready. Logged in as {bot.user} (id: {bot.user.id})")
-        # Sync application commands (slash commands) to Discord.
-        # If GUILD_ID is set we sync to that guild for instant availability during testing.
         guild_id = os.getenv("GUILD_ID")
         try:
             if guild_id:
@@ -262,8 +215,6 @@ async def on_ready():
 
 @bot.tree.command(name="verify")
 async def verify(interaction: discord.Interaction):
-    """Start character verification. Click the button to enter your IGN and Guild (no Character ID required)."""
-    # Create embed with instructions and button
     embed = discord.Embed(
         title="🔐 Account Verification",
     description="Verify AQW account",
@@ -271,9 +222,30 @@ async def verify(interaction: discord.Interaction):
     )
     embed.add_field(name="How to verify", value="1. Click the **Start Verification** button below\n2. Enter your IGN (In-Game Name)\n3. Enter your Guild (or leave blank if you have none)", inline=False)
 
-    # Send embed with button
     view = VerifyButton()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+@bot.tree.command(name="sync", description="Admin: Resync slash commands now")
+async def sync_commands(interaction: discord.Interaction):
+    try:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ You need administrator permission to run /sync.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild_id = os.getenv("GUILD_ID")
+        if guild_id:
+            guild_obj = discord.Object(id=int(guild_id))
+            synced = await bot.tree.sync(guild=guild_obj)
+            await interaction.followup.send(f"✅ Resynced {len(synced)} commands to guild {guild_id}.")
+        else:
+            synced = await bot.tree.sync()
+            await interaction.followup.send(f"✅ Resynced {len(synced)} global commands.")
+    except Exception as e:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"❌ Sync failed: {e}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
 
 def main():
