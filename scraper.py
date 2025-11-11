@@ -118,12 +118,12 @@ def get_character_info(char_id: str) -> Dict[str, Optional[str]]:
 async def get_character_info_async(char_id: str, session: aiohttp.ClientSession) -> Dict[str, Optional[str]]:
     params = {"id": char_id}
     try:
-        async with session.get(BASE, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(BASE, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"Character page returned status {resp.status}")
             html = await resp.text()
     except asyncio.TimeoutError:
-        raise RuntimeError(f"Timeout when fetching character page")
+        raise RuntimeError(f"Timeout when fetching character page (server took too long)")
     except Exception as e:
         raise RuntimeError(f"Network error when fetching character page: {e}")
 

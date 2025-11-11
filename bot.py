@@ -76,7 +76,7 @@ class VerificationModal(ui.Modal, title="Character Verification"):
         
         try:
             print(f"[on_submit] Starting verification for user {interaction.user}")
-            await interaction.response.defer(thinking=True)
+            await interaction.response.defer(ephemeral=True)
             print(f"[on_submit] Deferred interaction")
 
             user_ign = self.ign.value.strip()
@@ -84,6 +84,10 @@ class VerificationModal(ui.Modal, title="Character Verification"):
             print(f"[on_submit] User input: ign='{user_ign}', guild='{user_guild}'")
 
             char_id = user_ign
+
+            if http_session is None:
+                await interaction.followup.send("❌ Bot is still starting up. Please try again in a moment.", ephemeral=True)
+                return
 
             print(f"[on_submit] Fetching character info for char_id='{char_id}'")
             info = await get_character_info_async(char_id, http_session)
@@ -135,7 +139,7 @@ class VerificationModal(ui.Modal, title="Character Verification"):
                             description=f"Your verification has been recorded in {channel.mention}. An admin can close the channel when ready.",
                             color=discord.Color.green()
                         )
-                        await interaction.followup.send(embed=confirmation)
+                        await interaction.followup.send(embed=confirmation, ephemeral=True)
                 except Exception as channel_err:
                     print(f"[on_submit] Error creating admin channel: {channel_err}")
                     error_embed = discord.Embed(
@@ -144,21 +148,24 @@ class VerificationModal(ui.Modal, title="Character Verification"):
                         color=discord.Color.orange()
                     )
                     error_embed.add_field(name="Error", value=str(channel_err)[:200], inline=False)
-                    await interaction.followup.send(embed=error_embed)
+                    await interaction.followup.send(embed=error_embed, ephemeral=True)
             else:
                 embed.add_field(name="Status", value="❌ **Verification Failed** - Details do not match the character page.", inline=False)
                 print(f"[on_submit] Sending result embed to user...")
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embed, ephemeral=True)
             
             print(f"[on_submit] Result sent successfully")
             
         except Exception as e:
-            error_msg = f"❌ Verification failed: {str(e)}\n```\n{traceback.format_exc()}\n```"
-            print(f"[on_submit] ERROR: {error_msg}")
+            error_msg = f"❌ Verification failed: {str(e)}"
+            print(f"[on_submit] ERROR: {error_msg}\n{traceback.format_exc()}")
             try:
-                await interaction.followup.send(error_msg[:2000])  # Discord 2000 char limit
-            except:
-                print("[on_submit] Could not send error message to followup")
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(error_msg[:2000], ephemeral=True)
+                else:
+                    await interaction.followup.send(error_msg[:2000], ephemeral=True)
+            except Exception as send_err:
+                print(f"[on_submit] Could not send error message: {send_err}")
 
 
 class VerifyButton(ui.View):
