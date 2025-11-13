@@ -1,44 +1,79 @@
 # AQW Discord Verification Bot
 
-A Discord bot that verifies AdventureQuest Worlds (AQW) character ownership by comparing user-provided IGN and Guild information against the character's public CharPage at `https://account.aq.com/CharPage?id=<char_id>`.
+A comprehensive Discord bot for AdventureQuest Worlds (AQW) that provides character verification, detailed character lookups with equipment rendering, wiki searches, and shop information.
 
 ## Features
 
-### `/verify` Command
-- Opens a verification modal for users to enter their character information
-- User provides:
-  - **IGN (In-Game Name)**: Character name (used as character ID)
-  - **Guild**: Guild name (optional - leave blank if none)
-- Bot fetches character data from AQW CharPage
-- Compares user input against actual CharPage data
-- On successful verification:
-  - Creates a private admin-only channel
-  - Shows verification results in an embed
-  - Provides "Finish Verification" button
-- "Finish Verification" button:
-  - Changes user's Discord nickname to their IGN
-  - Deletes the verification channel
-  - Handles permission errors gracefully
+### `/verify` - Character Verification
+- Verifies character ownership by comparing user input with CharPage data
+- User provides IGN (In-Game Name) and optional Guild
+- Creates admin-only verification channel with results
+- Automatically updates Discord nickname to IGN on approval
+- Handles permission errors gracefully
 
-### `/deployhelper` Command (Admin Only)
-- Admin-only command for deployment assistance
-- Shows an empty embed with a "Help?" button
-- When clicked, displays a dropdown menu with options:
-  - Daily 4 Man
-  - Daily 7 man
-  - Daily Temple Run
-  - Weekly Ultras
-  - Ultraspeaker
-  - Grimchallenge
-  - Other
-- All interactions are ephemeral (visible only to the user who clicked)
+### `/char` - Character Lookup
+- Generates a clean, Flash-accurate render using the native swf2png service
+- Sends the render immediately after the character embed so the image is always displayed below the stats
+- Shows comprehensive character information:
+  - Level, class, faction, guild
+  - All equipped items (weapon, armor, helm, cape, pet, misc)
+  - All cosmetic items with wiki links
+- Renders are saved to `renders/` (auto-created and gitignored)
+- Gracefully reports renderer downtime inside the embed if swf2png is offline (see [SOLUTIONS.md](SOLUTIONS.md))
 
-## Technical Features
-- **Async HTTP** with connection pooling for fast character lookups
-- **Ephemeral responses** to prevent channel spam
-- **Error handling** with user-friendly messages
-- **Permission checks** for nickname changes
-- **Admin-only channels** for verification records
+### `/wiki` - Item Search
+- Searches AQW Wiki (aqwwiki.wikidot.com)
+- Shows detailed item information with images
+- Direct wiki links for more details
+
+### `/shop` - Shop Information
+- Looks up shop locations and contents
+- Shows available items and acquisition methods
+
+### `/deployhelper` - Deployment Assistant (Admin Only)
+- Quick-access dropdown menu for common deployments:
+  - Daily 4 Man, Daily 7 Man, Temple Run
+  - Weekly Ultras, Ultraspeaker, Grimchallenge
+- All interactions are ephemeral (private)
+
+## Technical Architecture
+
+### Character Rendering Pipeline
+- **swf2png Service** (Native Flash)
+  - ActionScript 3 TCP server on localhost:4567
+  - Produces cleaned PNG/GIF renders with no CharPage UI
+  - See [SOLUTIONS.md](SOLUTIONS.md) for setup instructions
+  - Bot notifies the user if the renderer is unreachable instead of silently failing
+
+### Standalone Character Renderer
+Need a quick render without running the bot? Use the bundled client for the swf2png
+service:
+
+```bash
+# Ensure the swf2png Item.swf service is running (see SOLUTIONS.md)
+python swf2png_client.py Yenne -o renders/yen.png
+
+# Cosmetic view or GIF output
+python swf2png_client.py Yenne --cosmetics --format gif -o renders/yen_cos.gif
+```
+
+The client automatically pulls FlashVars from the official CharPage, removes every
+UI element/background via the swf2png renderer, and saves a clean PNG (or GIF) of
+the character only. All artifacts are written to the `renders/` directory, which
+is recreated on demand and ignored by git.
+
+### Data Scraping
+- **scraper.py**: Async CharPage parser (49 FlashVars parameters)
+- **wiki_scraper.py**: AQW Wiki data extraction
+- **shop_scraper.py**: Shop information lookup
+- **ocr_service.py**: OCR for cosmetics item extraction
+
+### Bot Features
+- Async HTTP with connection pooling
+- Ephemeral responses to prevent spam
+- Admin-only verification channels
+- Automatic nickname management
+- Comprehensive error handling
 
 ## Quick Start
 
@@ -87,11 +122,18 @@ DISCORD_TOKEN="your_bot_token_here"
 python bot.py
 ```
 
-Or use the helper script:
+Or use the process manager helper:
 
 ```bash
-chmod +x run.sh
-./run.sh
+chmod +x start_all.sh
+./start_all.sh
+```
+
+`start_all.sh` stops any lingering processes, launches the scraper, bot, and
+swf2png AIR app (if installed). You can override paths without editing the file:
+
+```bash
+SWF2PNG_DIR="$HOME/dev/swf2png" LOG_DIR="$HOME/verificationbot/logs" ./start_all.sh
 ```
 
 ## Usage
@@ -147,23 +189,41 @@ chmod +x run.sh
 
 ```
 verificationbot/
-├── bot.py              # Main bot code with commands and views
-├── scraper.py          # Async CharPage scraper
-├── requirements.txt    # Python dependencies
-├── run.sh             # Helper script to run the bot
-├── .env               # Environment variables (not committed)
-├── .env.example       # Template for .env
-├── .gitignore         # Git ignore file
-└── README.md          # This file
+├── bot.py                   # Main bot with all commands
+├── scraper.py              # CharPage data scraper
+├── swf2png_client.py       # Native Flash renderer client (REQUIRED)
+├── wiki_scraper.py         # Wiki search functionality
+├── shop_scraper.py         # Shop information lookup
+├── ocr_service.py          # OCR for item extraction
+├── get_guild_id.py         # Guild lookup utility
+├── requirements.txt        # Python dependencies
+├── start_all.sh            # Process supervisor for scraper + bot + renderer
+├── .env                    # Environment variables (not committed)
+├── .env.example            # Template for .env
+├── QUICK_REFERENCE.md      # Triage / ops runbook
+├── SOLUTIONS.md            # Character rendering guide
+├── renders/                # Runtime render output (auto-created)
+└── README.md               # This file
 ```
 
 ## Requirements
 
 - Python 3.9+
 - discord.py 2.6.4+
-- aiohttp 3.10.11+
-- beautifulsoup4 4.14.2+
+- httpx 0.27.2+ (async HTTP client)
+- aiohttp 3.10.11+ (HTTP sessions)
+- beautifulsoup4 4.14.2+ (HTML parsing)
 - python-dotenv 1.2.1+
+- Pillow 11.0.0+ (image processing)
+- opencv-python 4.10.0+ (OCR preprocessing)
+- numpy 1.26.4+ (image math)
+- pytesseract 0.3.13+ (OCR)
+
+### Optional: swf2png Service
+For best character rendering quality, set up the swf2png service:
+- See [SOLUTIONS.md](SOLUTIONS.md) for detailed instructions
+- Requires Adobe AIR Runtime and Adobe Animate/Flash Professional
+- Provides native Flash rendering (vs Ruffle emulation)
 
 ## Security Notes
 
@@ -189,6 +249,14 @@ verificationbot/
 - Commands sync automatically on bot startup
 - Wait 1-2 minutes for Discord to update
 - Try restarting the bot
+
+## Health Checks
+
+- **Syntax validation**: `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m compileall bot.py scraper.py char_data_scraper.py ...`
+  (use `/tmp/pycache` so no cache files are written into the repo).
+- **Process status**: Inspect `/tmp/*.pid` files written by `start_all.sh` and `tail -f bot.log` / `scraper.log`.
+- **Renderer availability**: `python -c "import asyncio; from swf2png_client import SWF2PNGClient; print(asyncio.run(SWF2PNGClient().is_available()))"`
+- **Cleanup**: The `.gitignore` excludes logs, PID files, renders, and HTML/PNG snapshots so the working tree stays clean after tests.
 
 ## Future Enhancements
 

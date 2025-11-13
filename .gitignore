@@ -1,3 +1,14 @@
 __pycache__/
 venv/
 .env
+
+# Runtime artifacts
+*.log
+*.pid
+
+# Render outputs and media snapshots
+renders/
+*rendered*.png
+*rendered*.gif
+charpage*.html
+charpage*_result.png
